@@ -10,7 +10,7 @@ def mod_shape(shape, mod, dim):
 def unpack(data: torch.Tensor,
            element_bit_width: int,
            element_type: Optional[str] = None, 
-           dim: Optional[int] = 0,
+           dim: Optional[int] = -1,
            order: Optional[bool] = True,
            output_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
     """
@@ -59,7 +59,7 @@ def _unpack(data, element_size, container_size, scale, order, dim, device):
 def pack(data: torch.Tensor,
          element_bit_width: int,
          element_type: Optional[str] = None,
-         dim: Optional[int] = 0,
+         dim: Optional[int] = -1,
          container_dtype: Optional[torch.dtype] = None,
          pad: Optional[bool] = False,
          order: Optional[bool] = True) -> torch.Tensor:

@@ -21,7 +21,7 @@ from torchao.dtypes.utils import (
     _register_layout_cls,
     _get_layout_tensor_constructor,
 )
-
+from torchao.prototypes.common import bitpacking
 aten = torch.ops.aten
 
 def _aqt_is_int8(aqt):
@@ -198,6 +198,7 @@ class AffineQuantizedTensor(torch.Tensor):
         # TODO: this is only for "tensor_core_tiled", need to figure out
         # the proper API for this arg
         inner_k_tiles: Optional[int] = None,
+        pack: Optional[int] = None
     ):
         original_shape = input_float.shape
         if extended_layout == "tensor_core_tiled":
@@ -211,11 +212,10 @@ class AffineQuantizedTensor(torch.Tensor):
 
         scale, zero_point = choose_qparams_affine(input_float, mapping_type, block_size, target_dtype, quant_min, quant_max, eps, scale_dtype, zero_point_dtype, preserve_zero, zero_point_domain)
         int_data = quantize_affine(input_float, block_size, scale, zero_point, target_dtype, quant_min, quant_max, zero_point_domain)
-
         layout_cls_ctr = get_layout_tensor_constructor(extended_layout)
         # TODO: this is temporary, need to come up with the proper UX
         if extended_layout == "tensor_core_tiled":
-            layout_tensor = layout_cls_ctr(int_data, scale, zero_point, inner_k_tiles)
+            layout_tensor = layout_cls_ctr(int_data, scale, zero_point, inner_k_tiles, pack)
         else:
             layout_tensor = layout_cls_ctr(int_data, scale, zero_point)
         return cls(
@@ -424,6 +424,7 @@ class TensorCoreTiledAQTLayout(AQTLayout):
         packed_weight: torch.Tensor,
         scale_and_zero: torch.Tensor,
         transposed: bool,
+        packed: true,
     ):
         kwargs = {}
         kwargs["device"] = packed_weight.device
@@ -440,10 +441,12 @@ class TensorCoreTiledAQTLayout(AQTLayout):
         packed_weight: torch.Tensor,
         scale_and_zero: torch.Tensor,
         transposed: bool,
+        packed: bool,
     ):
         self.packed_weight = packed_weight
         self.scale_and_zero = scale_and_zero
         self.transposed = False
+        self.packed = packed
 
     def __tensor_flatten__(self):
         return ["packed_weight", "scale_and_zero"], [self.transposed]
@@ -457,12 +460,14 @@ class TensorCoreTiledAQTLayout(AQTLayout):
         return cls(packed_weight, scale_and_zero, transposed)
 
     @classmethod
-    def from_plain(cls, int_data, scale, zero_point, inner_k_tiles=8):
+    def from_plain(cls, int_data, scale, zero_point, inner_k_tiles=8, pack=None):
         packed_weight = torch.ops.aten._convert_weight_to_int4pack(int_data.to(torch.int32), inner_k_tiles)
+        if pack:
+            packed_weight = bitpacking.pack(packed_weight, 4, dim = 0)
         scale = scale.reshape(int_data.shape[0], -1)
         zero_point = zero_point.reshape(int_data.shape[0], -1)
         scale_and_zero = pack_tinygemm_scales_and_zeros(scale, zero_point)
-        return cls(packed_weight, scale_and_zero, False)
+        return cls(packed_weight, scale_and_zero, False, pack)
 
     def to(self, *args, **kwargs):
         kwargs = self._get_to_kwargs(*args, **kwargs)
@@ -523,6 +528,8 @@ class TensorCoreTiledAQTLayout(AQTLayout):
         zero_point_domain = ZeroPointDomain.FLOAT
         assert len(block_size) == 2 and block_size[0] == 1
         groupsize = block_size[-1]
+        if self.packed:
+            self.weight = bitpacking.unpack(self.weight, 4, dim = 0)
         dequantized = torch.ops.aten._weight_int4pack_mm(torch.eye(eye_shape, device=device, dtype=original_dtype), self.packed_weight, groupsize, self.scale_and_zero)
         dequantized = dequantized.t().contiguous()
         scale, zero = unpack_tinygemm_scales_and_zeros(self.scale_and_zero)
