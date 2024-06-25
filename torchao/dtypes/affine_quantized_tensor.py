@@ -21,7 +21,7 @@ from torchao.dtypes.utils import (
     _register_layout_cls,
     _get_layout_tensor_constructor,
 )
-from torchao.prototypes.common import bitpacking
+from torchao.prototype.common import bitpacking
 aten = torch.ops.aten
 
 def _aqt_is_int8(aqt):
@@ -424,7 +424,7 @@ class TensorCoreTiledAQTLayout(AQTLayout):
         packed_weight: torch.Tensor,
         scale_and_zero: torch.Tensor,
         transposed: bool,
-        packed: true,
+        pack: int,
     ):
         kwargs = {}
         kwargs["device"] = packed_weight.device
@@ -433,7 +433,9 @@ class TensorCoreTiledAQTLayout(AQTLayout):
         )
         kwargs["dtype"] = packed_weight.dtype
         kwargs["requires_grad"] = False
-        shape = packed_weight.shape
+        if pack:
+            shape = (packed_weight.shape[0]*8, *packed_weight.shape[1:])
+        print("registered shape: ", shape)
         return torch.Tensor._make_wrapper_subclass(cls, shape, **kwargs)  # type: ignore[attr-defined]
 
     def __init__(
@@ -456,13 +458,14 @@ class TensorCoreTiledAQTLayout(AQTLayout):
         cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
     ):
         packed_weight, scale_and_zero = tensor_data_dict["packed_weight"], tensor_data_dict["scale_and_zero"]
-        transposed, = tensor_attributes
-        return cls(packed_weight, scale_and_zero, transposed)
+        transposed = tensor_attributes
+        return cls(packed_weight, scale_and_zero, transposed, 4)
 
     @classmethod
     def from_plain(cls, int_data, scale, zero_point, inner_k_tiles=8, pack=None):
         packed_weight = torch.ops.aten._convert_weight_to_int4pack(int_data.to(torch.int32), inner_k_tiles)
         if pack:
+            # print("before packing: ", packed_weight.shape)
             packed_weight = bitpacking.pack(packed_weight, 4, dim = 0)
         scale = scale.reshape(int_data.shape[0], -1)
         zero_point = zero_point.reshape(int_data.shape[0], -1)
@@ -510,10 +513,13 @@ class TensorCoreTiledAQTLayout(AQTLayout):
     def get_plain(self):
         from torchao.quantization.quant_primitives import (
             ZeroPointDomain,
-            unpack_tinygemm_scales_and_zeros,
             quantize_affine,
         )
-        cur_shape = self.shape
+        from torchao.quantization.utils import unpack_tinygemm_scales_and_zeros
+        if self.packed:
+            self.packed_weight = bitpacking.unpack(self.packed_weight, 4, dim = 0)
+        # cur_shape = self.shape
+        cur_shape = self.packed_weight.shape
         assert len(cur_shape) == 4
         inner_k_tiles = cur_shape[-1] * 2
         original_shape = (cur_shape[0] * 8, cur_shape[1] * (inner_k_tiles * 16))
@@ -528,8 +534,7 @@ class TensorCoreTiledAQTLayout(AQTLayout):
         zero_point_domain = ZeroPointDomain.FLOAT
         assert len(block_size) == 2 and block_size[0] == 1
         groupsize = block_size[-1]
-        if self.packed:
-            self.weight = bitpacking.unpack(self.weight, 4, dim = 0)
+        
         dequantized = torch.ops.aten._weight_int4pack_mm(torch.eye(eye_shape, device=device, dtype=original_dtype), self.packed_weight, groupsize, self.scale_and_zero)
         dequantized = dequantized.t().contiguous()
         scale, zero = unpack_tinygemm_scales_and_zeros(self.scale_and_zero)

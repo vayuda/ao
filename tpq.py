@@ -27,19 +27,19 @@ m = ToyLinearModel(1024, 1024, 1024).eval().to(dtype).to("cuda")
 m_bf16 = copy.deepcopy(m)
 example_inputs = m.example_inputs(dtype=dtype, device="cuda")
 
-m_bf16 = torch.compile(m_bf16, full_graph=True, mode='max-autotune')
+m_bf16 = torch.compile(m_bf16, fullgraph=True)
 # apply int4 weight only quant (compatible with tinygemm int4 weight only quant mm kernel in torchao)
 group_size = 32
 m = quantize(m, int4_weight_only(group_size=group_size, pack=4))
 
-torch._inductor.config.force_fuse_int_mm_with_mul = True
-torch._inductor.config.use_mixed_mm = True
+# torch._inductor.config.force_fuse_int_mm_with_mul = True
+# torch._inductor.config.use_mixed_mm = True
 
 # temporary workaround for tensor subclass + torch.compile
 from torchao.utils import unwrap_tensor_subclass
 m = unwrap_tensor_subclass(m)
 # compile the model to improve performance
-m = torch.compile(m, full_graph=True, mode='max-autotune')
+m = torch.compile(m, fullgraph=True)
 
 # benchmark to see the speedup
 from torchao.utils import benchmark_model
